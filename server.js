@@ -1,15 +1,13 @@
 // server.js — Microservicio informativo (one-way) para MiTasaTop
 // Mantiene una sesión de WhatsApp (Baileys) viva y expone un endpoint
 // POST /alerta que postea un mensaje en el grupo GP.
-//
-// Variables de entorno (configurar en Railway):
-//   BOT_TOKEN     -> token secreto para autorizar las llamadas a /alerta
-//   GRUPO_GP_JID  -> jid del grupo GP (ej. 120363427871263203@g.us)
-//   AUTH_DIR      -> ruta de credenciales de Baileys (default ./auth)
-//                    En Railway debe apuntar al volumen montado, ej. /data/auth
-//   PORT          -> puerto HTTP (Railway lo inyecta automáticamente)
 
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  Browsers,
+  fetchLatestBaileysVersion
+} from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import express from 'express';
 
@@ -18,52 +16,72 @@ const GRUPO_GP_JID = process.env.GRUPO_GP_JID || '';
 const AUTH_DIR     = process.env.AUTH_DIR     || './auth';
 const PORT         = process.env.PORT         || 3000;
 
-let sock = null;          // instancia de Baileys
-let conectado = false;    // estado de conexión a WA
+let sock = null;
+let conectado = false;
+let ultimoQR = null;
 
 async function iniciarWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { version } = await fetchLatestBaileysVersion();
 
-  sock = makeWASocket({ auth: state });
+  sock = makeWASocket({
+    version,
+    auth: state,
+    browser: Browsers.ubuntu('Chrome'),
+    printQRInTerminal: false
+  });
+
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      ultimoQR = qr;
       console.log('\n=== Escanea este QR con el WhatsApp del chip del bot ===\n');
       qrcode.generate(qr, { small: true });
+      console.log('\n(Si no se ve bien aqui, abre la ruta /qr del servicio en el navegador)\n');
     }
 
     if (connection === 'open') {
       conectado = true;
+      ultimoQR = null;
       console.log('✅ Conectado a WhatsApp.');
     }
 
     if (connection === 'close') {
       conectado = false;
       const code = lastDisconnect?.error?.output?.statusCode;
-      const reconnect = code !== DisconnectReason.loggedOut;
-      console.log('Conexión cerrada. Reconectar?', reconnect, '(code:', code, ')');
-      if (reconnect) {
-        setTimeout(iniciarWhatsApp, 3000); // reintenta tras 3s
-      } else {
-        console.log('Sesión cerrada (loggedOut). Hay que re-escanear el QR.');
+
+      if (code === DisconnectReason.loggedOut) {
+        console.log('Sesion cerrada (loggedOut). Borra el volumen /data/auth y reinicia para re-escanear.');
+        return;
       }
+
+      console.log('Conexion cerrada. Reintentando en 10s... (code:', code, ')');
+      setTimeout(iniciarWhatsApp, 10000);
     }
   });
 }
 
-// ---- API HTTP ----
 const app = express();
 app.use(express.json());
 
-// Healthcheck simple
 app.get('/', (req, res) => {
   res.json({ ok: true, conectado, grupo: GRUPO_GP_JID ? 'configurado' : 'FALTA_JID' });
 });
 
-// Endpoint principal: postea una alerta en el grupo GP
+app.get('/qr', (req, res) => {
+  if (conectado) return res.send('Ya conectado. No hace falta QR.');
+  if (!ultimoQR)  return res.send('Aun no hay QR. Recarga en unos segundos.');
+  const url = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(ultimoQR)}`;
+  res.send(`<html><body style="text-align:center;font-family:sans-serif">
+    <h3>Escanea con el WhatsApp del chip del bot</h3>
+    <img src="${url}" />
+    <p>Dispositivos vinculados -> Vincular un dispositivo</p>
+  </body></html>`);
+});
+
 app.post('/alerta', async (req, res) => {
   const { token, texto } = req.body || {};
 
