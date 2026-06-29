@@ -1,6 +1,6 @@
 // server.js — Microservicio informativo (one-way) para MiTasaTop
 // Mantiene una sesión de WhatsApp (Baileys) viva y expone un endpoint
-// POST /alerta que postea un mensaje en el grupo GP.
+// POST /alerta que postea un mensaje en un grupo.
 
 import makeWASocket, {
   useMultiFileAuthState,
@@ -71,6 +71,20 @@ app.get('/', (req, res) => {
   res.json({ ok: true, conectado, grupo: GRUPO_GP_JID ? 'configurado' : 'FALTA_JID' });
 });
 
+// Lista los grupos donde esta el bot (util para obtener JIDs de prueba)
+app.get('/grupos', async (req, res) => {
+  if (!conectado || !sock) {
+    return res.status(503).json({ ok: false, error: 'bot no conectado' });
+  }
+  try {
+    const grupos = await sock.groupFetchAllParticipating();
+    const lista = Object.values(grupos).map(g => ({ nombre: g.subject, jid: g.id }));
+    res.json({ ok: true, grupos: lista });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: 'fallo al listar grupos' });
+  }
+});
+
 app.get('/qr', (req, res) => {
   if (conectado) return res.send('Ya conectado. No hace falta QR.');
   if (!ultimoQR)  return res.send('Aun no hay QR. Recarga en unos segundos.');
@@ -82,8 +96,10 @@ app.get('/qr', (req, res) => {
   </body></html>`);
 });
 
+// Endpoint principal: postea una alerta.
+// Si se pasa "jid" en el body, postea a ese grupo; si no, usa GRUPO_GP_JID.
 app.post('/alerta', async (req, res) => {
-  const { token, texto } = req.body || {};
+  const { token, texto, jid } = req.body || {};
 
   if (token !== BOT_TOKEN) {
     return res.status(401).json({ ok: false, error: 'token invalido' });
@@ -94,13 +110,15 @@ app.post('/alerta', async (req, res) => {
   if (!conectado || !sock) {
     return res.status(503).json({ ok: false, error: 'bot no conectado a WhatsApp' });
   }
-  if (!GRUPO_GP_JID) {
-    return res.status(500).json({ ok: false, error: 'GRUPO_GP_JID no configurado' });
+
+  const destino = (jid && typeof jid === 'string') ? jid : GRUPO_GP_JID;
+  if (!destino) {
+    return res.status(500).json({ ok: false, error: 'no hay destino (ni jid ni GRUPO_GP_JID)' });
   }
 
   try {
-    await sock.sendMessage(GRUPO_GP_JID, { text: texto });
-    res.json({ ok: true });
+    await sock.sendMessage(destino, { text: texto });
+    res.json({ ok: true, destino });
   } catch (err) {
     console.error('Error enviando alerta:', err);
     res.status(500).json({ ok: false, error: 'fallo al enviar' });
